@@ -150,7 +150,7 @@ def _fwd_kernel_flash_decode_stage1_head_slots(
     stride_mid_o_eb,
     stride_mid_o_eh,
     stride_mid_o_es,
-    gqa_group_size,
+    gqa_group_size: tl.constexpr,
     Q_HEAD_NUM: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -184,7 +184,7 @@ def _fwd_kernel_flash_decode_stage1_head_slots(
     max_logic = tl.zeros([Q_HEAD_NUM], dtype=tl.float32) - float("inf")
     acc = tl.zeros([Q_HEAD_NUM, BLOCK_DMODEL], dtype=tl.float32)
 
-    for start_n in range(0, block_n_size, 1):
+    for start_n in tl.range(0, block_n_size, 1):
         offs_n_new = start_n * BLOCK_N + offs_n
         k_loc = tl.load(
             Head_slots
@@ -459,7 +459,7 @@ def flash_decode_stage1(
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK_N,
         num_warps=2,
-        num_stages=2,
+        num_stages=1,
     )
     return
 

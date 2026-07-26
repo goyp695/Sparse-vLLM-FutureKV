@@ -93,16 +93,18 @@ def _processor_messages(
             messages.append(dict(message))
             continue
         content = []
-        for part in re.split(r"(<image\\d*>)", str(raw_content)):
-            if re.fullmatch(r"<image\\d*>", part):
+        for part in re.split(r"(<image\d*>)", str(raw_content)):
+            if re.fullmatch(r"<image\d*>", part):
                 try:
                     path = next(image_iter)
-                except StopIteration as exc:
-                    raise ValueError(
-                        f"Sample {record.sample_id} has more image markers than image paths."
-                    ) from exc
-                image = stack.enter_context(Image.open(path)).convert("RGB")
-                content.append({"type": "image", "image": image})
+                except StopIteration:
+                    # MathVision can repeat a numbered placeholder after the
+                    # actual image. Match the inference adapter: consume each
+                    # supplied image once and preserve surplus markers as text.
+                    content.append({"type": "text", "text": part})
+                else:
+                    image = stack.enter_context(Image.open(path)).convert("RGB")
+                    content.append({"type": "image", "image": image})
             elif part:
                 content.append({"type": "text", "text": part})
         messages.append({"role": message.get("role", "user"), "content": content})

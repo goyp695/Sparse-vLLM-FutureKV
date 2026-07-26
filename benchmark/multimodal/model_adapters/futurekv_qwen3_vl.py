@@ -236,7 +236,7 @@ def build_sparsevllm_engine_kwargs(args: Any) -> dict[str, Any]:
         "tensor_parallel_size": int(
             getattr(args, "vllm_tensor_parallel_size", 1) or 1
         ),
-        "chunk_prefill_size": int(
+        "engine_prefill_chunk_size": int(
             getattr(args, "sparsevllm_chunk_prefill_size", 0) or 0
         ),
     }

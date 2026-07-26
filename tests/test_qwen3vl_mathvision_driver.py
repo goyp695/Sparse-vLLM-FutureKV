@@ -275,7 +275,7 @@ class Qwen3VLMathVisionDriverTest(unittest.TestCase):
         self.assertEqual(engine_kwargs["sparse_method"], "futurekv")
         self.assertEqual(engine_kwargs["futurekv_window_size"], 64)
         self.assertEqual(engine_kwargs["tensor_parallel_size"], 2)
-        self.assertEqual(engine_kwargs["chunk_prefill_size"], 128)
+        self.assertEqual(engine_kwargs["engine_prefill_chunk_size"], 128)
         self.assertEqual(engine_kwargs["futurekv_judge_path"], str(judge_path))
 
 if __name__ == "__main__":

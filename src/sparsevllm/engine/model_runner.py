@@ -23,6 +23,7 @@ from sparsevllm.utils.loader import load_model, sync_deltakv_config_from_checkpo
 from sparsevllm.engine.cache_manager import CacheManager
 from sparsevllm.engine.decode_cuda_graph import DecodeCudaGraphRunner
 from sparsevllm.engine.sparse_controller import SparseController
+from sparsevllm.engine.thresholds import sparse_decode_partitions_by_long_text
 import sparsevllm.platforms as platforms
 from sparsevllm.utils.profiler import profiler
 

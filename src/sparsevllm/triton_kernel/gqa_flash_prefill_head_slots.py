@@ -30,7 +30,7 @@ def _gqa_flash_prefill_head_slots_kernel(
     stride_om,
     stride_oh,
     stride_od,
-    gqa_group_size,
+    gqa_group_size: tl.constexpr,
     sm_scale,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -54,7 +54,7 @@ def _gqa_flash_prefill_head_slots_kernel(
     accumulator = tl.zeros((BLOCK_M, BLOCK_D), tl.float32)
     query_positions = query_position_start + query_offsets
 
-    for key_start in range(0, kv_len, BLOCK_N):
+    for key_start in tl.range(0, kv_len, BLOCK_N):
         key_offsets = key_start + tl.arange(0, BLOCK_N)
         key_mask = key_offsets < kv_len
         physical_slots = tl.load(
@@ -161,5 +161,8 @@ def gqa_flash_prefill_head_slots(
         BLOCK_N=block_n,
         BLOCK_D=head_dim,
         num_warps=4,
-        num_stages=2,
+        # Dynamic head-slot pointers depend on values loaded inside the loop.
+        # Triton's multi-stage software pipeline can schedule those pointer
+        # uses before their loads for long loops.
+        num_stages=1,
     )
