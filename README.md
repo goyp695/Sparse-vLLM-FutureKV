@@ -1,149 +1,109 @@
-<div align="center">
-  <img src="docs/assets/logo.png" alt="Sparse-vLLM" style="width:42%; height:auto;">
+# FutureKV
 
-  <p>
-    <a href="https://deepwiki.com/CURRENTF/Sparse-vLLM"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-    <a href="https://arxiv.org/abs/2602.08005"><img src="https://img.shields.io/badge/arXiv-2602.08005-b31b1b.svg" alt="arXiv"></a>
-    <a href="https://arxiv.org/pdf/2602.08005.pdf"><img src="https://img.shields.io/badge/PDF-download-brightgreen.svg" alt="PDF"></a>
-  </p>
-</div>
+FutureKV 是面向 Qwen3-VL 长上下文推理的按 KV head 稀疏缓存方案。本仓库
+包含原生推理实现、独立的 Judge 训练代码，以及 MathVision 评测入口。
+训练包和推理包可以分别安装，二者通过版本化的 Judge checkpoint 对接。
 
-A sparse-first inference engine for long-context LLM serving, including native
-FutureKV inference, standalone FutureKV judge training, and DeltaKV tooling.
+## 仓库内容
 
-<div align="center">
-  <img src="docs/assets/sparse_vllm_throughput.png" alt="Sparse-vLLM throughput" style="width:86%; height:auto;">
-</div>
+```text
+src/sparsevllm/        原生 Sparse-vLLM runtime 与 FutureKV cache manager
+benchmark/multimodal/ Qwen3-VL MathVision 推理驱动
+futurekv_training/     独立的 Judge、二阶段续训和可选 LoRA 训练包
+scripts/futurekv/      可直接运行的评测脚本
+docs/                  设计、训练、推理和复现实验说明
+tests/                 runtime、kernel、checkpoint 与驱动测试
+```
 
-## Project Overview
+## FutureKV 工作方式
 
-Sparse-vLLM is an inference framework built with sparsity as the first design principle. Instead of layering sparse methods on top of a conventional KV cache, it rethinks cache layout, controller flow, and kernels so that multiple sparse mechanisms can plug in cleanly.
+每个 KV head 独立维护稀疏缓存，最近 token 受到保护，历史 token 由训练得到的
+Judge 根据 key/value 特征和 future-attention 信息打分。推理时使用固定的
+checkpoint pair：
 
-DeltaKV-related compressor training, HF wrapper comparisons, and benchmark
-adapters live under `src/deltakv/` and `benchmark/`.
+```text
+judge_model.pt
+judge_model_meta.json
+```
 
-## Key Runtime Principles
+默认参数与含义：
 
-- Public commands and `LLM(...)` kwargs should use `sparse_method`; Sparse-vLLM
-  normalizes it internally to `vllm_sparse_method`.
-- Sparse method runtime state belongs in
-  `src/sparsevllm/engine/cache_manager/`; `attention.py` should stay generic.
-- Prefill scheduling is method-specific and registry-owned. The source of
-  truth is `src/sparsevllm/method_registry.py`, not benchmark scripts.
-- Sparse-vLLM currently uses two prefill policies: `all_chunked` and the
-  special `long_bs1full_short_batch` policy.
-- `long_bs1full_short_batch` is only for methods that are registered to need a
-  complete long-prefill pass before their sparse/cache transformation. Long
-  requests run as full prefill with batch size 1; short requests still use
-  chunked batching.
-- Benchmark reports should record the sparse method, prefill policy, prefill
-  chunk size, prompt length, batch size, and any DeltaKV checkpoint.
+| 参数 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `kv_budget` | `1024` | 每个 KV head 最多保留的 KV token 数 |
+| `window_size` | `1024` | Judge 特征使用的 query 环形缓存长度，不是额外 KV budget |
+| `step_drop` | `256` | 每次淘汰决策处理的 token 数 |
+| `divide_length` | `128` | Judge/runtime 的决策分段长度 |
 
-## Core Sparse Methods
+## 安装
 
-Sparse-vLLM supports physical eviction, logical masking, query-aware selection,
-and hybrid KV compression. The main method families are `streamingllm`,
-`snapkv`, `futurekv`, `pyramidkv`, `omnikv`, `quest`, and `deltakv`.
-
-| Method | Type | Short Description |
-| --- | --- | --- |
-| `vanilla` | Dense baseline | Runs full attention and keeps the standard KV cache behavior for correctness and performance baselines. |
-| `streamingllm` / `attention-sink` | Physical eviction | Keeps fixed sink tokens plus a recent window, then physically evicts older tokens outside that policy. |
-| `snapkv`, `pyramidkv` | Physical eviction | Selects important historical tokens during prefill/finalization and stores only the retained KV tokens. |
-| `futurekv` | Learned physical eviction | Uses a trained per-head judge and future-attention features to retain a fixed KV budget. |
-| `omnikv` | Logical masking | Keeps tokens in storage but masks the attention read view so sparse layers attend only selected context. |
-| `quest` | Query-aware selection | Uses decode-time query-aware page selection while keeping prefill dense. |
-| `deltakv` / `deltakv-*` | Hybrid compression | Keeps a small full-precision pool and stores older context through DeltaKV compression or related ablations. |
-
-Read the method overview and integration rules in
-[Core Sparse Methods](docs/features/sparse-methods.md).
-
-## Documentation
-
-| Topic | Link |
-| --- | --- |
-| Quick setup and minimal usage | [Getting Started](docs/getting_started/README.md) |
-| Sparse method taxonomy and extension rules | [Core Sparse Methods](docs/features/README.md) |
-| Runtime architecture | [Architecture](docs/design/README.md) |
-| Runtime parameter semantics | [Runtime Parameter Semantics](docs/configuration/runtime-parameter-semantics.md) |
-| Benchmark commands | [Benchmarks](docs/benchmarking/README.md) |
-| DeltaKV inference and training | [DeltaKV](docs/features/deltakv.md) |
-| FutureKV overview | [FutureKV](docs/features/futurekv.md) |
-| FutureKV training | [FutureKV training](docs/getting_started/futurekv-training.md) |
-| FutureKV inference | [FutureKV inference](docs/getting_started/futurekv-inference.md) |
-| Reproducibility checklist | [Reproducibility](docs/getting_started/reproducibility.md) |
-
-The full documentation index is maintained in [docs/README.md](docs/README.md).
-
-## Quick Start
-
-Install the package from the repository root:
+推理 runtime：
 
 ```bash
-conda create -n svllm python=3.10 -y
-conda activate svllm
-pip install torch==2.8.0 transformers[torch]==4.53.3 accelerate deepspeed==0.15.4 torchvision datasets==4.1.0 bitsandbytes
-pip install fire matplotlib seaborn wandb loguru ansible
-MAX_JOBS=8 pip install flash-attn --no-build-isolation
 pip install -e .
 ```
 
-For the full dependency list and a minimal `LLM(...)` example, see
-[Getting Started](docs/getting_started/README.md).
-
-### FutureKV quick path
-
-Install inference from the repository root and training independently:
+独立训练包：
 
 ```bash
-pip install -e .
 pip install -e './futurekv_training[test]'
 ```
 
-Train a judge, then pass the exported `judge_model.pt` to the native
-MathVision runner. See the [FutureKV guide](docs/features/futurekv.md) for
-complete commands and checkpoint compatibility rules.
+建议使用与本地 Qwen3-VL 模型匹配的 Transformers、PyTorch 和 CUDA/Triton
+版本；完整依赖与环境说明见 [Getting Started](docs/getting_started/README.md)。
 
-## Benchmarks
+## Judge 训练
 
-Use `scripts/benchmarks/bench_sparse_vllm.py` for throughput measurements and
-the `benchmark/` entrypoints for LongBench, MathBench, SCBench, NIAH, and
-multimodal evaluations.
+训练数据是 JSON list。每条记录包含 `messages`、可选唯一 `id` 和相对于
+`--image-root` 的 `images` 路径：
 
-See [Benchmarks](docs/benchmarking/README.md) for command examples and backend notes.
-
-## Contributing Sparse Methods
-
-New sparse methods should keep method-specific runtime state in
-`src/sparsevllm/engine/cache_manager/` and keep
-`src/sparsevllm/layers/attention.py` generic.
-
-
-## Acknowledgements
-
-This project is inspired by and/or references ideas and implementation techniques from:
-
-- `LightLLM` (`ModelTC/LightLLM`)
-- `ShadowKV` (`ByteDance-Seed/ShadowKV`)
-- `nano-vllm` (`GeeeekExplorer/nano-vllm`)
-
-## License
-
-[Apache License 2.0](LICENSE)
-
-## Citation
-```text
-@article{hao2026deltakv,
-  title={DeltaKV: Residual-Based KV Cache Compression via Long-Range Similarity},
-  author={Hao, Jitai and Huang, Qiang and Wang, Yaowei and Zhang, Min and Yu, Jun},
-  journal={arXiv preprint arXiv:2602.08005},
-  year={2026}
-}
-
-@inproceedings{hao2025omnikv,
-  title={Omnikv: Dynamic context selection for efficient long-context llms},
-  author={Hao, Jitai and Zhu, Yuke and Wang, Tian and Yu, Jun and Xin, Xin and Zheng, Bo and Ren, Zhaochun and Guo, Sheng},
-  booktitle={The Thirteenth International Conference on Learning Representations},
-  year={2025}
-}
+```bash
+futurekv-train-judge \
+  --base-model /path/to/Qwen3-VL \
+  --dataset /path/to/train.json \
+  --image-root /path/to/images \
+  --output-dir ./outputs/judge \
+  --device cuda:0 \
+  --max-steps 1000
 ```
+
+训练会冻结 Qwen3-VL，仅更新每层的 Judge，并原子写出 checkpoint pair。
+二阶段正确性过滤/续训和可选 LoRA 训练见
+[FutureKV training](docs/getting_started/futurekv-training.md)。
+
+## Qwen3-VL 推理
+
+```bash
+scripts/futurekv/run_mathvision.sh \
+  /path/to/Qwen3-VL \
+  /path/to/mathvision.json \
+  /path/to/images \
+  /path/to/judge/judge_model.pt \
+  ./outputs/mathvision_futurekv.jsonl
+```
+
+脚本会检查模型、数据、图片目录和 checkpoint；`judge_model_meta.json` 必须
+与 `judge_model.pt` 位于同一目录。直接使用 Python 时选择
+`--backend sparsevllm --method futurekv`。推理入口使用 greedy 解码
+（`temperature=0`）以保证评测可复现。更多说明见
+[FutureKV inference](docs/getting_started/futurekv-inference.md)。
+
+## 验证
+
+运行 FutureKV 与训练包测试：
+
+```bash
+PYTHONPATH=src:futurekv_training pytest -q \
+  tests/test_futurekv_attention_fail_fast.py \
+  tests/test_futurekv_cache_manager.py \
+  tests/test_futurekv_checkpoint_contract.py \
+  tests/test_futurekv_judge.py \
+  tests/test_qwen3vl_mathvision_driver.py \
+  futurekv_training/tests
+```
+
+仓库还提供 GPU kernel 数值校验、公开仓库卫生检查和 wheel 构建检查。
+
+## 许可
+
+本项目使用 [Apache License 2.0](LICENSE)。
