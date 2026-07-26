@@ -17,11 +17,11 @@
 - Modify: `src/sparsevllm/engine/sparse_controller.py`
 - Modify: `tests/test_futurekv_cache_manager.py`
 
-- [ ] **Step 1: 为不同 head 的选择写失败测试**
+- [x] **Step 1: 为不同 head 的选择写失败测试**
 
 测试必须构造两个 head 的不相交选择，断言压缩后的物理 row 恰好等于 target length，并检查 K/V 数值被正确搬运。
 
-- [ ] **Step 2: 运行测试确认当前 union-retention 行为失败**
+- [x] **Step 2: 运行测试确认当前 union-retention 行为失败**
 
 ```bash
 PYTHONPATH=src conda run -n vllm python -m pytest -q tests/test_futurekv_cache_manager.py
@@ -29,7 +29,7 @@ PYTHONPATH=src conda run -n vllm python -m pytest -q tests/test_futurekv_cache_m
 
 预期失败：当前实现使用 head 选择结果的物理 slot 并集，`row_seq_lens` 大于 target length。
 
-- [ ] **Step 3: 为 `apply_futurekv_head_keep` 增加 gathered K/V 契约**
+- [x] **Step 3: 为 `apply_futurekv_head_keep` 增加 gathered K/V 契约**
 
 接口增加：
 
@@ -46,7 +46,7 @@ PYTHONPATH=src conda run -n vllm python -m pytest -q tests/test_futurekv_cache_m
 5. 两个 head 使用同一组目标 slot，但保留各自 logical indices。
 6. 只释放旧 row 的尾部 slot，并把 row length 设置为 target length。
 
-- [ ] **Step 4: 从 SparseController 传递 gathered K/V**
+- [x] **Step 4: 从 SparseController 传递 gathered K/V**
 
 在计算 keep indices 时复用已经 gather 的 `key/value`，调用：
 
@@ -62,7 +62,7 @@ self.cache_manager.apply_futurekv_head_keep(
 )
 ```
 
-- [ ] **Step 5: 运行 FutureKV cache manager 与 checkpoint 相关测试**
+- [x] **Step 5: 运行 FutureKV cache manager 与 checkpoint 相关测试**
 
 ```bash
 PYTHONPATH=src:futurekv_training conda run -n vllm python -m pytest -q \
@@ -72,7 +72,7 @@ PYTHONPATH=src:futurekv_training conda run -n vllm python -m pytest -q \
   tests/test_futurekv_judge.py
 ```
 
-- [ ] **Step 6: 提交独立 commit**
+- [x] **Step 6: 提交独立 commit**
 
 ```bash
 git add src/sparsevllm/engine/cache_manager/futurekv.py \
@@ -81,18 +81,18 @@ git add src/sparsevllm/engine/cache_manager/futurekv.py \
 git commit -m "fix: repack FutureKV physical slots"
 ```
 
-### Task 2: 逐项验证 scheduler 修复
+### Task 2: 逐项验证 scheduler 修复（无需同步）
 
 **Files:**
 - Inspect/modify: `src/sparsevllm/engine/scheduler.py`
 - Inspect/modify: `src/sparsevllm/engine/cache_manager/base.py`
 - Test: `tests/test_prefill_schedule_policy.py`
 
-- [ ] **Step 1: 对照公开版接口与源任务接口**
+- [x] **Step 1: 对照公开版接口与源任务接口**
 
 只比较 prompt admission、暂时 defer、永久不可容纳 fail-fast 三类逻辑；忽略 DeltaKV 专属调度改动。
 
-- [ ] **Step 2: 为公开版缺失行为写最小失败测试**
+- [x] **Step 2: 检查现有公开版测试覆盖**
 
 覆盖：
 
@@ -102,18 +102,18 @@ git commit -m "fix: repack FutureKV physical slots"
 已有 completion 的 decode request 不被错误重放
 ```
 
-- [ ] **Step 3: 运行失败测试并确认是公开版缺少行为**
+- [x] **Step 3: 运行调度回归，122 项通过**
 
 ```bash
 PYTHONPATH=src conda run -n vllm python -m pytest -q \
   tests/test_prefill_schedule_policy.py
 ```
 
-- [ ] **Step 4: 只移植与公开版 memory-oracle 接口匹配的最小改动**
+- [x] **Step 4: 确认源任务 DeltaKV 专属改动不适用于公开版**
 
 不复制源任务的 DeltaKV 分支、preemption 重构或 config 字段。
 
-- [ ] **Step 5: 运行完整 scheduler 回归**
+- [x] **Step 5: 运行完整 scheduler 回归**
 
 ```bash
 PYTHONPATH=src conda run -n vllm python -m pytest -q \
@@ -122,53 +122,53 @@ PYTHONPATH=src conda run -n vllm python -m pytest -q \
   tests/test_engine_shutdown.py
 ```
 
-- [ ] **Step 6: 若有实际改动则单独提交，否则记录“不需同步”**
+- [x] **Step 6: 记录“不需同步”**
 
-### Task 3: 逐项验证 ModelRunner chunked-prefill 修复
+### Task 3: 逐项验证 ModelRunner chunked-prefill 修复（不适用）
 
 **Files:**
 - Inspect/modify: `src/sparsevllm/engine/model_runner.py`
 - Inspect/modify: `src/sparsevllm/engine/sequence.py`
 - Test: add or modify the smallest relevant runtime test
 
-- [ ] **Step 1: 检查公开版是否存在中间 prefill token 采样历史**
+- [x] **Step 1: 检查公开版不存在 `_sampling_output_token_ids` 历史**
 
 只有公开版确实维护中间 chunk 的输出 token 或 RNG 状态时，才移植该修复。
 
-- [ ] **Step 2: 若存在，写测试证明 chunk size 不应改变首个真实生成 token**
+- [x] **Step 2: 确认源任务 bug 不存在于公开版**
 
 测试必须区分“中间 chunk 计算出的临时 logits”与“最后 chunk 才提交的生成 token”。
 
-- [ ] **Step 3: 运行失败测试**
+- [x] **Step 3: 通过公开版 runtime 结构检查**
 
 ```bash
 PYTHONPATH=src conda run -n vllm python -m pytest -q \
   tests/test_sampler.py tests/test_prefill_schedule_policy.py
 ```
 
-- [ ] **Step 4: 只移植公开版所需的提交时机修复**
+- [x] **Step 4: 不移植源任务 ModelRunner 重构**
 
 不复制源任务的完整 ModelRunner 重构。
 
-- [ ] **Step 5: 运行 runtime 回归并单独提交或记录不适用**
+- [x] **Step 5: 记录“不适用”**
 
-### Task 4: 逐项验证 Sampler 修复
+### Task 4: 逐项验证 Sampler 修复（不适用）
 
 **Files:**
 - Inspect/modify: `src/sparsevllm/layers/sampler.py`
 - Inspect/modify: `tests/test_sampler.py`
 
-- [ ] **Step 1: 对照采样器输入输出契约**
+- [x] **Step 1: 对照采样器输入输出契约**
 
 确认公开版是否需要请求级 RNG、presence/repetition penalty 历史或仅使用当前 logits。
 
-- [ ] **Step 2: 为公开版真实缺陷写最小失败测试**
+- [x] **Step 2: 确认公开版没有源任务新增 penalty 参数**
 
 只覆盖公开版实际暴露的行为，不引入源任务不存在的字段。
 
-- [ ] **Step 3: 运行失败测试后写最小修复**
+- [x] **Step 3: 不移植会改变公开版 sampler 契约的改动**
 
-- [ ] **Step 4: 运行 sampler、Qwen3-VL driver 和 FutureKV 端到端回归**
+- [x] **Step 4: 运行 sampler、Qwen3-VL driver 和 scheduler 回归，139 项通过**
 
 ```bash
 PYTHONPATH=src:futurekv_training conda run -n vllm python -m pytest -q \
@@ -178,7 +178,7 @@ PYTHONPATH=src:futurekv_training conda run -n vllm python -m pytest -q \
   futurekv_training/tests
 ```
 
-- [ ] **Step 5: 单独提交或记录不适用**
+- [x] **Step 5: 记录“不适用”**
 
 ### Task 5: 最终验证与 GitHub 同步准备
 
@@ -195,4 +195,3 @@ conda run -n vllm python scripts/validation/check_public_repo.py
 - [ ] **Step 3: 检查工作区只包含已验证提交**
 
 - [ ] **Step 4: 推送 `main` 并核对 GitHub commit**
-
