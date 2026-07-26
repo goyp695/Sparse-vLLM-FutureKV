@@ -352,19 +352,110 @@ class FutureKVCacheManager(SnapKVCacheManager):
         current_head_slots: torch.Tensor,
         current_head_indices: torch.Tensor,
         keep_indices: torch.Tensor,
+        *,
+        gathered_key: torch.Tensor,
+        gathered_value: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         row_idx = self._row_idx(layer_idx, seq)
         before = int(self.row_seq_lens[layer_idx][row_idx])
-        keep_indices = keep_indices.to(device=current_head_slots.device, dtype=torch.long).contiguous()
-        gather_idx = keep_indices.to(torch.long)
-        new_head_slots = current_head_slots.gather(1, gather_idx).to(torch.int32).contiguous()
-        new_head_indices = current_head_indices.gather(1, gather_idx).to(torch.long).contiguous()
-
         old_base_slots = self.buffer_req_to_token_slots[layer_idx][row_idx, :before].clone()
-        union_slots = torch.unique(new_head_slots.flatten())
-        keep_mask = torch.isin(old_base_slots, union_slots)
-        kept_base_slots = old_base_slots[keep_mask]
-        dropped_slots = old_base_slots[~keep_mask]
+
+        def validation_failed(reason: str):
+            raise RuntimeError(
+                "FutureKV repack validation failed: "
+                f"layer={layer_idx} seq_id={seq.seq_id} {reason}"
+            )
+
+        if current_head_slots.ndim != 2:
+            validation_failed("current_head_slots must be shaped [heads, length].")
+        if current_head_indices.shape != current_head_slots.shape:
+            validation_failed("current_head_indices must match current_head_slots.")
+        if keep_indices.ndim != 2 or int(keep_indices.shape[0]) != int(current_head_slots.shape[0]):
+            validation_failed("keep_indices must be shaped [heads, target_length].")
+        if int(current_head_slots.shape[0]) != int(self.num_kv_heads):
+            validation_failed("current head count does not match the cache manager.")
+        expected_gather_shape = (
+            1,
+            int(current_head_slots.shape[0]),
+            int(current_head_slots.shape[1]),
+        )
+        if (
+            gathered_key.ndim != 4
+            or tuple(gathered_key.shape[:3]) != expected_gather_shape
+            or gathered_value.shape != gathered_key.shape
+        ):
+            validation_failed(
+                "gathered_key/value must be shaped [1, heads, current_length, head_dim]."
+            )
+        if gathered_key.dtype != gathered_value.dtype:
+            validation_failed("gathered_key/value must use the same dtype.")
+        devices = {
+            current_head_slots.device,
+            current_head_indices.device,
+            keep_indices.device,
+            gathered_key.device,
+            gathered_value.device,
+            old_base_slots.device,
+        }
+        if len(devices) != 1:
+            validation_failed("all inputs must be on the same device.")
+
+        target_len = int(keep_indices.shape[1])
+        logical_len = int(current_head_slots.shape[1])
+        if target_len <= 0:
+            validation_failed("target length must be positive.")
+        if target_len > logical_len or target_len > before:
+            validation_failed("target length exceeds logical or physical cache length.")
+        if int(torch.unique(old_base_slots).numel()) != before:
+            validation_failed("cache-manager row must contain unique physical slots.")
+
+        keep_indices = keep_indices.to(dtype=torch.long).contiguous()
+        if int(keep_indices.min().item()) < 0 or int(keep_indices.max().item()) >= logical_len:
+            validation_failed("keep_indices must be within the current logical cache length.")
+
+        k_cache, v_cache = self.get_layer_kv_cache(layer_idx)
+        if (
+            k_cache.ndim != 3
+            or v_cache.shape != k_cache.shape
+            or tuple(k_cache.shape[1:]) != (
+                int(current_head_slots.shape[0]),
+                int(gathered_key.shape[-1]),
+            )
+            or k_cache.device != gathered_key.device
+            or v_cache.device != gathered_value.device
+            or k_cache.dtype != gathered_key.dtype
+            or v_cache.dtype != gathered_value.dtype
+        ):
+            validation_failed("cache shape/device/dtype does not match gathered K/V.")
+        if (
+            int(old_base_slots.min().item()) < 0
+            or int(old_base_slots.max().item()) >= int(k_cache.shape[0])
+        ):
+            validation_failed("cache-manager row contains an invalid physical slot.")
+
+        destination_slots = old_base_slots[:target_len].clone()
+        expanded_keep = keep_indices.view(
+            1,
+            int(keep_indices.shape[0]),
+            target_len,
+            1,
+        ).expand(
+            int(gathered_key.shape[0]),
+            int(keep_indices.shape[0]),
+            target_len,
+            int(gathered_key.shape[-1]),
+        )
+        selected_key = gathered_key.gather(2, expanded_keep)[0].transpose(0, 1).contiguous()
+        selected_value = gathered_value.gather(2, expanded_keep)[0].transpose(0, 1).contiguous()
+        destination_indices = destination_slots.to(dtype=torch.long)
+        k_cache.index_copy_(0, destination_indices, selected_key)
+        v_cache.index_copy_(0, destination_indices, selected_value)
+
+        new_head_slots = destination_slots.view(1, -1).expand(
+            int(current_head_slots.shape[0]), -1
+        ).to(torch.int32).contiguous()
+        new_head_indices = current_head_indices.gather(1, keep_indices).to(torch.long).contiguous()
+        dropped_slots = old_base_slots[target_len:]
 
         if dropped_slots.numel() > 0:
             count = int(dropped_slots.numel())
@@ -375,19 +466,19 @@ class FutureKVCacheManager(SnapKVCacheManager):
             self.futurekv_dropped_slots += count
 
         self.buffer_req_to_token_slots[layer_idx][row_idx, :] = 0
-        self.buffer_req_to_token_slots[layer_idx][row_idx, :kept_base_slots.numel()] = kept_base_slots
-        self.row_seq_lens[layer_idx][row_idx] = int(kept_base_slots.numel())
+        self.buffer_req_to_token_slots[layer_idx][row_idx, :target_len] = destination_slots
+        self.row_seq_lens[layer_idx][row_idx] = target_len
         self.futurekv_head_states[layer_idx][int(seq.seq_id)] = self._make_futurekv_head_state(
             new_head_slots,
             new_head_indices,
-            base_len=int(kept_base_slots.numel()),
+            base_len=target_len,
         )
 
         if log_level == "DEBUG":
             logger.debug(
                 "[FutureKV] per-head eviction: "
                 f"layer={layer_idx} seq_id={seq.seq_id} base_before={before} "
-                f"base_after={int(kept_base_slots.numel())} head_len={int(new_head_slots.shape[1])} "
+                f"base_after={target_len} head_len={int(new_head_slots.shape[1])} "
                 f"dropped={int(dropped_slots.numel())}"
             )
         return new_head_slots, new_head_indices

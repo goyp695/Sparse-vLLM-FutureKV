@@ -703,6 +703,8 @@ class SparseController:
                 head_slots,
                 head_indices,
                 keep_indices,
+                gathered_key=key,
+                gathered_value=value,
             )
 
     def on_layer_end(self, layer_idx: int, context):
