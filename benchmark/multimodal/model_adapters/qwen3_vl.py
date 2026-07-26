@@ -420,3 +420,15 @@ def infer_visual_token_count(inputs: dict[str, Any]) -> int:
 def decode_generated(processor: Any, output_ids: torch.Tensor, input_ids: torch.Tensor) -> list[str]:
     generated_ids = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, output_ids)]
     return processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+
+
+# FutureKV uses a generation-oriented adapter with a different public
+# contract from the existing DeltaKV benchmark adapter above. Keep the two
+# implementations separate and re-export only the MathVision compatibility
+# surface.
+from .futurekv_qwen3_vl import (  # noqa: E402,F401
+    SparseQwen3VLGenerationWrapper,
+    batch_to_device,
+    build_sparsevllm_engine_kwargs,
+    load_model,
+)

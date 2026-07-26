@@ -6,6 +6,11 @@ from sparsevllm.config import Config
 from sparsevllm.engine.activation_controller import ActivationController
 from sparsevllm.engine.sequence import Sequence
 from sparsevllm.engine.cache_manager import CacheManager, SparseSelection
+from sparsevllm.engine.futurekv_judge import (
+    FutureKVJudgeBank,
+    FutureKVLayerRuntimeState,
+    compute_futurekv_attn_info,
+)
 from sparsevllm.utils.profiler import profiler
 from sparsevllm.utils.context import get_context
 from sparsevllm.utils.log import logger, log_level
@@ -57,6 +62,7 @@ class SparseController:
     def __init__(self, config: Config, cache_manager: CacheManager):
         self.sparse_method = config.vllm_sparse_method
         self.is_deltakv_family = isinstance(self.sparse_method, str) and self.sparse_method.startswith('deltakv')
+        self.is_futurekv = self.sparse_method == "futurekv"
         self.debug_dynamic_selection = {}
         self.debug_dynamic_selection_detail = os.environ.get(
             "SPARSEVLLM_DEBUG_DYNAMIC_SELECTION_DETAIL", ""
@@ -93,6 +99,27 @@ class SparseController:
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
         }[score_dtype_name]
+
+        self.futurekv_judge: FutureKVJudgeBank | None = None
+        self.futurekv_runtime_states: dict[tuple[int, int], FutureKVLayerRuntimeState] = {}
+        if self.is_futurekv:
+            try:
+                self.futurekv_judge = FutureKVJudgeBank(
+                    self.config,
+                    rank=getattr(self.cache_manager, "rank", 0),
+                    world_size=getattr(self.cache_manager, "world_size", 1),
+                    device=self.device,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "FutureKV requires a complete compatible judge checkpoint; "
+                    "random or attention-score fallback is disabled."
+                ) from exc
+            if not self.futurekv_judge.enabled:
+                raise RuntimeError(
+                    "FutureKV requires judge_model tensors but none were loaded. "
+                    f"path={self.config.futurekv_judge_path!r}"
+                )
         
         # 稀疏层私有状态: dict[layer_idx, LayerSparseState]
         self.layer_batch_sparse_states: dict[int, LayerBatchSparseState] = {}
@@ -109,6 +136,10 @@ class SparseController:
             "obs_layer_ids": self.config.obs_layer_ids,
             "full_attn_layers": self.config.full_attn_layers,
             "dynamic_deltakv_topk_tiebreak": self.dynamic_deltakv_topk_tiebreak,
+            "futurekv_budget": getattr(self.config, "futurekv_budget", None),
+            "futurekv_window_size": getattr(self.config, "futurekv_window_size", None),
+            "futurekv_step_drop": getattr(self.config, "futurekv_step_drop", None),
+            "futurekv_judge_loaded": self._futurekv_uses_judge(),
         }
 
         self.layers = None
@@ -306,9 +337,12 @@ class SparseController:
         return self.layer_batch_sparse_states[layer_idx].max_context_len
 
     @torch.no_grad()
-    def on_layer_attention_end(self, layer_idx: int):
+    def on_layer_attention_end(self, layer_idx: int, q: torch.Tensor | None = None):
         """Layer-local sparse finalization for methods that use temporary prefill KV."""
+        del q
         ctx = get_context()
+        if self.is_futurekv:
+            return
         if not ctx.is_prefill or self.sparse_method != "pyramidkv":
             return
         if not self.cache_manager.has_prefill_staging_view(layer_idx):
@@ -374,7 +408,7 @@ class SparseController:
 
     @torch.no_grad()
     def on_every_chunk_prefill_end(self, seqs: list[Sequence]):
-        if get_context().is_long_text is False and not self.is_deltakv_family:
+        if get_context().is_long_text is False and not self.is_deltakv_family and not self.is_futurekv:
             return
 
         # DeltaKV: Always try to compress incrementally (to save memory during long prefill)
@@ -405,6 +439,7 @@ class SparseController:
         if ((self.sparse_method == "omnikv" or is_dynamic_deltakv) and layer_idx in self.full_attn_layers) or \
             self.sparse_method in (
                 'snapkv',
+                'futurekv',
                 'pyramidkv',
                 'quest',
                 'rkv',
@@ -483,6 +518,192 @@ class SparseController:
     ) -> SparseSelection:
         del active_slots, req_indices, context_lens
         return self._build_selection(layer_idx, is_prefill=False, q=q)
+
+    def _get_futurekv_budget(self, layer_idx: int) -> int | None:
+        if layer_idx < int(self.config.futurekv_num_full_layers):
+            return None
+        return int(self.config.futurekv_budget)
+
+    def _futurekv_trigger_len(self, layer_idx: int) -> int:
+        budget = self._get_futurekv_budget(layer_idx)
+        if budget is None:
+            return 1 << 60
+        return budget + int(self.config.futurekv_step_drop)
+
+    def _futurekv_uses_judge(self) -> bool:
+        return bool(
+            self.is_futurekv
+            and self.futurekv_judge is not None
+            and self.futurekv_judge.enabled
+        )
+
+    def _futurekv_state(self, layer_idx: int, seq_id: int) -> FutureKVLayerRuntimeState:
+        key = (int(layer_idx), int(seq_id))
+        state = self.futurekv_runtime_states.get(key)
+        if state is None:
+            state = FutureKVLayerRuntimeState()
+            self.futurekv_runtime_states[key] = state
+        return state
+
+    def free_seq(self, seq_id: int):
+        seq_id = int(seq_id)
+        for key in [key for key in self.futurekv_runtime_states if key[1] == seq_id]:
+            self.futurekv_runtime_states.pop(key, None)
+
+    def _futurekv_select_head_indices(
+        self,
+        scores: torch.Tensor,
+        kv_len: int,
+        budget: int,
+    ) -> torch.Tensor:
+        if scores.dim() != 2:
+            raise ValueError(f"expected FutureKV scores [kv_heads, old_len], got {tuple(scores.shape)}")
+        step_drop = int(self.config.futurekv_step_drop)
+        if kv_len < budget + step_drop:
+            raise ValueError(
+                f"FutureKV compression triggered too early: kv_len={kv_len} "
+                f"budget={budget} step_drop={step_drop}"
+            )
+        heads = int(scores.shape[0])
+        recent_len = min(step_drop, kv_len)
+        old_end = kv_len - recent_len
+        keep_old = budget - recent_len
+        recent = torch.arange(
+            old_end,
+            kv_len,
+            device=scores.device,
+            dtype=torch.long,
+        ).view(1, -1).expand(heads, -1)
+        if keep_old <= 0 or old_end <= 0:
+            return recent[:, -budget:].contiguous()
+
+        keep_old = min(keep_old, old_end)
+        old_scores = scores[:, :old_end]
+        valid = old_scores > -1e19
+        selected = old_scores.masked_fill(~valid, -torch.inf).topk(
+            keep_old,
+            dim=1,
+            largest=True,
+            sorted=True,
+        ).indices
+        fallback = torch.arange(
+            old_end - keep_old,
+            old_end,
+            device=scores.device,
+            dtype=torch.long,
+        ).view(1, -1).expand(heads, -1)
+        selected = torch.where(
+            valid.sum(dim=1, keepdim=True) >= keep_old,
+            selected,
+            fallback,
+        ).sort(dim=1).values
+        return torch.cat([selected, recent], dim=1).contiguous()
+
+    def _futurekv_gather_head_kv(
+        self,
+        layer_idx: int,
+        head_slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        k_cache, v_cache = self.cache_manager.get_layer_kv_cache(layer_idx)
+        slots = head_slots.to(torch.long)
+        heads = torch.arange(
+            slots.shape[0],
+            device=slots.device,
+            dtype=torch.long,
+        ).view(-1, 1).expand_as(slots)
+        return (
+            k_cache[slots, heads].unsqueeze(0).contiguous(),
+            v_cache[slots, heads].unsqueeze(0).contiguous(),
+        )
+
+    def _futurekv_seq_q_and_positions(
+        self,
+        batch_idx: int,
+        q: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        context = get_context()
+        if context.is_prefill and context.cu_seqlens_q is not None:
+            start = int(context.cu_seqlens_q[batch_idx].item())
+            end = int(context.cu_seqlens_q[batch_idx + 1].item())
+            return q[start:end], None if positions is None else positions[start:end]
+        return (
+            q[batch_idx:batch_idx + 1],
+            None if positions is None else positions[batch_idx:batch_idx + 1],
+        )
+
+    @torch.no_grad()
+    def before_layer_attention(
+        self,
+        layer_idx: int,
+        q: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ):
+        if not self._futurekv_uses_judge():
+            return
+        budget = self._get_futurekv_budget(layer_idx)
+        if budget is None:
+            return
+        context = get_context()
+        seqs = getattr(context, "seqs", None)
+        if not seqs:
+            return
+
+        trigger_len = self._futurekv_trigger_len(layer_idx)
+        for batch_idx, seq in enumerate(seqs):
+            q_slice, position_slice = self._futurekv_seq_q_and_positions(
+                batch_idx,
+                q,
+                positions,
+            )
+            if q_slice.numel() == 0:
+                continue
+            runtime_state = self._futurekv_state(layer_idx, seq.seq_id)
+            runtime_state.append_queries(
+                q_slice,
+                window_size=int(self.config.futurekv_window_size),
+            )
+            self.cache_manager.sync_futurekv_head_state(
+                layer_idx,
+                seq,
+                position_slice,
+                sync_indices=bool(context.is_prefill),
+                sync_slots=bool(context.is_prefill),
+            )
+            kv_len = int(self.cache_manager.get_futurekv_head_length(layer_idx, seq))
+            if kv_len < trigger_len:
+                runtime_state.reset_attention_stats()
+                continue
+            if context.is_prefill and not seq.is_last_chunk_prefill:
+                continue
+
+            head_slots, head_indices = self.cache_manager.get_futurekv_head_slots_and_indices(
+                layer_idx,
+                seq,
+            )
+            key, value = self._futurekv_gather_head_kv(layer_idx, head_slots)
+            attn_info, runtime_state = compute_futurekv_attn_info(
+                runtime_state.get_queries(),
+                key,
+                step_drop=int(self.config.futurekv_step_drop),
+                runtime_state=runtime_state,
+            )
+            old_end = kv_len - int(self.config.futurekv_step_drop)
+            scores = self.futurekv_judge.score(
+                layer_idx,
+                key[:, :, :old_end].detach(),
+                value[:, :, :old_end].detach(),
+                attn_info.to(dtype=key.dtype),
+            )[0]
+            keep_indices = self._futurekv_select_head_indices(scores, kv_len, budget)
+            runtime_state.gather_keep_indices(keep_indices)
+            self.cache_manager.apply_futurekv_head_keep(
+                layer_idx,
+                seq,
+                head_slots,
+                head_indices,
+                keep_indices,
+            )
 
     def on_layer_end(self, layer_idx: int, context):
         """每一层结束后的动态策略 (如 OmniKV / DeltaKV)"""

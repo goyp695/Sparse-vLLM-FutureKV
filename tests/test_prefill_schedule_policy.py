@@ -1033,6 +1033,17 @@ class SchedulerPrefillPolicyTest(unittest.TestCase):
         self.assertTrue(is_prefill)
         self.assertTrue(all(seq.current_chunk_size <= 5 for seq in scheduled))
 
+    def test_zero_chunk_size_runs_prompt_in_one_prefill(self):
+        scheduler = make_scheduler(PREFILL_POLICY_ALL_CHUNKED, method="futurekv", chunk=0, max_tokens=20)
+        seq = seq_with_len(12)
+        scheduler.add(seq)
+
+        scheduled, is_prefill, _ = scheduler.schedule()
+
+        self.assertTrue(is_prefill)
+        self.assertEqual(scheduled, [seq])
+        self.assertEqual(seq.current_chunk_size, 12)
+
     def test_long_bs1full_policy_schedules_long_as_single_full_prefill(self):
         scheduler = make_scheduler(
             PREFILL_POLICY_LONG_BS1FULL_SHORT_BATCH,

@@ -75,6 +75,7 @@ class PrefillComputeView:
     attn_score: torch.Tensor | None = None
     max_context_len: int | None = None
     temp_slots: torch.Tensor | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class CacheManager(ABC):
@@ -129,6 +130,10 @@ class CacheManager(ABC):
             from .snapkv import SnapKVCacheManager
 
             return SnapKVCacheManager(config, rank, world_size)
+        if sparse_method == "futurekv":
+            from .futurekv import FutureKVCacheManager
+
+            return FutureKVCacheManager(config, rank, world_size)
         if sparse_method == "rkv":
             from .rkv import RKVCacheManager
 

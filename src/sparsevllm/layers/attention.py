@@ -69,6 +69,7 @@ class Attention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        positions: torch.Tensor | None = None,
     ):
         context = get_context()
         cache_manager = context.cache_manager
@@ -77,6 +78,11 @@ class Attention(nn.Module):
 
         temp_slots = None
         try:
+            sparse_controller.before_layer_attention(
+                layer_idx,
+                q,
+                positions=positions,
+            )
             if context.is_prefill:
                 selection = sparse_controller.get_prefill_selection(layer_idx)
                 cache_manager.before_prefill_layer_attention(layer_idx, selection)

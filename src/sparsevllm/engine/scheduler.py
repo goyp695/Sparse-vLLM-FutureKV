@@ -4,6 +4,10 @@ from collections import deque
 from sparsevllm.config import Config
 from sparsevllm.engine.sequence import Sequence, SequenceStatus
 from sparsevllm.engine.cache_manager import CacheManager
+from sparsevllm.engine.thresholds import (
+    sparse_decode_partitions_by_long_text,
+    sparse_long_text_threshold,
+)
 from sparsevllm.method_registry import (
     PREFILL_POLICY_ALL_CHUNKED,
     PREFILL_POLICY_LONG_BS1FULL_SHORT_BATCH,
@@ -90,9 +94,11 @@ class Scheduler:
         self.decoding.rotate(idx)
         return seq
 
-    def _pop_next_decoding_seq(self, target_is_long: bool) -> Sequence | None:
+    def _pop_next_decoding_seq(self, target_is_long: bool | None) -> Sequence | None:
         if not self.decoding:
             return None
+        if target_is_long is None:
+            return self.decoding.popleft()
         for idx, seq in enumerate(self.decoding):
             if self._is_long_text(seq, is_prefill=False) == target_is_long:
                 return self._pop_decoding_at(idx)
@@ -170,6 +176,11 @@ class Scheduler:
         num_batched_tokens: int,
         step_free_count: int,
     ) -> int:
+        chunk_limit = (
+            int(remaining_prefill_tokens)
+            if int(self.chunk_prefill_size) <= 0
+            else int(self.chunk_prefill_size)
+        )
         if self.memory_oracle.requires_full_prefill_step(seq):
             available = min(
                 self.max_num_batched_tokens - num_batched_tokens,
@@ -181,7 +192,7 @@ class Scheduler:
         if self.prefill_schedule_policy == PREFILL_POLICY_ALL_CHUNKED:
             return min(
                 remaining_prefill_tokens,
-                self.chunk_prefill_size,
+                chunk_limit,
                 self.max_num_batched_tokens - num_batched_tokens,
                 step_free_count,
             )
@@ -190,14 +201,14 @@ class Scheduler:
                 if self._requires_long_prefill_offload(seq):
                     return min(
                         remaining_prefill_tokens,
-                        self.chunk_prefill_size,
+                        chunk_limit,
                         self.max_num_batched_tokens - num_batched_tokens,
                         step_free_count,
                     )
                 return int(remaining_prefill_tokens)
             return min(
                 remaining_prefill_tokens,
-                self.chunk_prefill_size,
+                chunk_limit,
                 self.max_num_batched_tokens - num_batched_tokens,
                 step_free_count,
             )

@@ -11,6 +11,7 @@ __all__ = [
     "StandardCacheManager",
     "StreamingLLMCacheManager",
     "SnapKVCacheManager",
+    "FutureKVCacheManager",
     "RKVCacheManager",
     "SkipKVCacheManager",
     "QuestCacheManager",
@@ -35,6 +36,10 @@ def __getattr__(name: str):
         from .snapkv import SnapKVCacheManager
 
         return SnapKVCacheManager
+    if name == "FutureKVCacheManager":
+        from .futurekv import FutureKVCacheManager
+
+        return FutureKVCacheManager
     if name == "RKVCacheManager":
         from .rkv import RKVCacheManager
 

@@ -94,6 +94,10 @@ class ModelRunner:
                     "Use a Transformers version with Qwen3 support for Qwen3 models."
                 )
             self.model = Qwen3ForCausalLM(hf_config)
+        elif hf_config.model_type == "qwen3_vl_text" and config.multimodal_hf_config is not None:
+            from sparsevllm.models.qwen3_vl import Qwen3VLForConditionalGeneration
+
+            self.model = Qwen3VLForConditionalGeneration(config.multimodal_hf_config)
         elif hf_config.model_type == "llama":
             self.model = LlamaForCausalLM(hf_config)
         else:
@@ -117,6 +121,16 @@ class ModelRunner:
             self.sparse_controller.set_modules(self.model.model.layers)
             if hasattr(self.cache_manager, "set_model_layers"):
                 self.cache_manager.set_model_layers(self.model.model.layers)
+        elif (
+            hasattr(self.model, "model")
+            and hasattr(self.model.model, "language_model")
+            and hasattr(self.model.model.language_model, "layers")
+        ):
+            layers = self.model.model.language_model.layers
+            self.model.model.language_model.sparse_controller = self.sparse_controller
+            self.sparse_controller.set_modules(layers)
+            if hasattr(self.cache_manager, "set_model_layers"):
+                self.cache_manager.set_model_layers(layers)
 
         # 加载 DeltaKV 压缩器
         self.load_deltakv_compressors()
@@ -278,6 +292,12 @@ class ModelRunner:
                 before = self.cache_manager.free_slot_stats()
                 logger.info("model_runner.free_slots seq_id={} before={}", seq_id, before)
             self.cache_manager.free_seq(seq_id)
+            sparse_controller = getattr(self, "sparse_controller", None)
+            if sparse_controller is not None:
+                sparse_controller.free_seq(seq_id)
+            model = getattr(self, "model", None)
+            if model is not None and hasattr(model, "free_seq"):
+                model.free_seq(seq_id)
             if os.getenv("SPARSEVLLM_DEBUG_SLOTS", "0") == "1":
                 after = self.cache_manager.free_slot_stats()
                 logger.info("model_runner.free_slots seq_id={} after={}", seq_id, after)
@@ -293,6 +313,12 @@ class ModelRunner:
                 logger.info("model_runner.free_slots_batch seq_ids={} before={}", seq_ids, before)
             for seq_id in seq_ids:
                 self.cache_manager.free_seq(seq_id)
+                sparse_controller = getattr(self, "sparse_controller", None)
+                if sparse_controller is not None:
+                    sparse_controller.free_seq(seq_id)
+                model = getattr(self, "model", None)
+                if model is not None and hasattr(model, "free_seq"):
+                    model.free_seq(seq_id)
             if os.getenv("SPARSEVLLM_DEBUG_SLOTS", "0") == "1":
                 after = self.cache_manager.free_slot_stats()
                 logger.info("model_runner.free_slots_batch seq_ids={} after={}", seq_ids, after)
@@ -367,6 +393,8 @@ class ModelRunner:
             flags = [int(seq.num_prompt_tokens) > int(threshold) for seq in seqs]
         else:
             flags = [int(seq.num_tokens) > int(threshold) for seq in seqs]
+        if not is_prefill and not sparse_decode_partitions_by_long_text(self.config):
+            return any(flags)
         is_long = bool(flags[0])
         if any(bool(flag) != is_long for flag in flags):
             raise ValueError("Mixed long/short batch detected; scheduler should enforce separation.")

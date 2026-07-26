@@ -10,10 +10,16 @@ from sparsevllm.triton_kernel.flash_decoding_stage1 import flash_decode_stage1_w
 from sparsevllm.triton_kernel.flash_decoding_stage2 import flash_decode_stage2
 from sparsevllm.triton_kernel.flash_decoding_stage2_hd256 import flash_decode_stage2 as flash_decode_stage2_hd256
 from sparsevllm.triton_kernel.gqa_flash_decoding_stage1 import flash_decode_stage1 as gqa_flash_decode_stage1
+from sparsevllm.triton_kernel.gqa_flash_decoding_stage1 import (
+    flash_decode_stage1_head_slots as gqa_flash_decode_stage1_head_slots,
+)
 from sparsevllm.triton_kernel.gqa_flash_decoding_stage1 import flash_decode_stage1_with_score as gqa_flash_decode_stage1_with_score
 from sparsevllm.triton_kernel.gqa_flash_decoding_stage1_hd256 import flash_decode_stage1 as gqa_flash_decode_stage1_hd256
 from sparsevllm.triton_kernel.gqa_flash_decoding_stage1_hd256 import (
     flash_decode_stage1_with_score as gqa_flash_decode_stage1_hd256_with_score,
+)
+from sparsevllm.triton_kernel.gqa_flash_prefill_head_slots import (
+    gqa_flash_prefill_head_slots,
 )
 from sparsevllm.utils.log import log_once
 from sparsevllm.utils.profiler import profiler
@@ -93,6 +99,24 @@ class TritonAttentionBackend:
             _fill_fake_attention_score(view.attn_score)
             return _fake_attention_output(q)
         o = torch.empty_like(q)
+        if view.active_slots.dim() == 3:
+            if view.metadata is None or view.metadata.get("head_indices") is None:
+                raise RuntimeError("FutureKV per-head prefill requires logical head_indices.")
+            context = get_context()
+            for batch_idx, seq in enumerate(context.seqs):
+                q_start = int(context.cu_seqlens_q[batch_idx].item())
+                q_end = int(context.cu_seqlens_q[batch_idx + 1].item())
+                kv_len = int(view.context_lens[batch_idx].item())
+                gqa_flash_prefill_head_slots(
+                    q[q_start:q_end],
+                    view.k_cache,
+                    view.v_cache,
+                    view.active_slots[batch_idx, :, :kv_len],
+                    view.metadata["head_indices"][batch_idx, :, :kv_len],
+                    int(seq.num_prefilled_tokens),
+                    o[q_start:q_end],
+                )
+            return o
         context_attention_fwd(
             q,
             view.k_cache,
@@ -194,6 +218,32 @@ class TritonAttentionBackend:
             )
             o = torch.empty_like(q)
             flash_decode_stage2(mid_o, mid_o_logexpsum, view.context_lens, o, block_seq)
+            return o
+        if view.backend == "futurekv_head_slots":
+            if view.active_slots.dim() != 3:
+                raise RuntimeError(
+                    "FutureKV decode requires active_slots shaped "
+                    f"[batch, kv_heads, tokens], got {tuple(view.active_slots.shape)}."
+                )
+            gqa_flash_decode_stage1_head_slots(
+                q,
+                view.k_cache,
+                view.v_cache,
+                view.active_slots,
+                view.context_lens,
+                max_len_in_batch,
+                mid_o,
+                mid_o_logexpsum,
+                block_seq,
+            )
+            o = torch.empty_like(q)
+            flash_decode_stage2(
+                mid_o,
+                mid_o_logexpsum,
+                view.context_lens,
+                o,
+                block_seq,
+            )
             return o
         self._debug_check_decode_bounds(view)
         if view.backend == "flash_attn_contiguous":

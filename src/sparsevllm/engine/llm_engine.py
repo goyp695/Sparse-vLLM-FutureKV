@@ -422,7 +422,12 @@ class LLMEngine:
                     p.kill()
                     p.join(timeout=max(0.0, join_timeout_s))
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+    def add_request(
+        self,
+        prompt: str | list[int],
+        sampling_params: SamplingParams,
+        multi_modal_data: dict | None = None,
+    ):
         """将一个新的推理请求加入系统"""
         if isinstance(prompt, str):
             # Match HF manual_generate: add BOS for raw prompts, but do not
@@ -440,7 +445,7 @@ class LLMEngine:
                 "Reduce prompt/decoding length or increase max_model_len if the model supports it."
             )
         logger.debug(f'add prompt with {len(prompt)} tokens.')
-        seq = Sequence(prompt, sampling_params)
+        seq = Sequence(prompt, sampling_params, multi_modal_data=multi_modal_data)
         self.scheduler.add(seq)
         return seq.seq_id
 
@@ -660,7 +665,7 @@ class LLMEngine:
 
     def generate(
         self,
-        prompts: list[str] | list[list[int]],
+        prompts: list[str] | list[list[int]] | list[dict],
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[dict]:
@@ -676,7 +681,11 @@ class LLMEngine:
         
         # 提交所有请求
         for prompt, sp in zip(prompts, sampling_params):
-            self.add_request(prompt, sp)
+            multi_modal_data = None
+            if isinstance(prompt, dict):
+                multi_modal_data = prompt.get("multi_modal_data")
+                prompt = prompt.get("prompt_token_ids", prompt.get("prompt", []))
+            self.add_request(prompt, sp, multi_modal_data=multi_modal_data)
             
         outputs = {}
         prefill_throughput = decode_throughput = 0.

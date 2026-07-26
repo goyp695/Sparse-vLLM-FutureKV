@@ -1,0 +1,16 @@
+{
+  "backend": "sparsevllm",
+  "method": "futurekv",
+  "kv_budget": 1024,
+  "window_size": 1024,
+  "step_drop": 256,
+  "divide_length": 128,
+  "futurekv_num_full_layers": 0,
+  "tensor_parallel_size": 1,
+  "batch_size": 1,
+  "max_new_tokens": 2048,
+  "temperature": 0.0,
+  "top_p": 0.8,
+  "top_k": 20,
+  "seed": 42
+}

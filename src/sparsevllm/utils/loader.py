@@ -402,6 +402,8 @@ def load_model(model: nn.Module, path: str, *, rank: int | None = None, world_si
     for file in files:
         with safe_open(file, "pt", "cpu") as f:
             for source_weight_name in f.keys():
+                if "judge_model" in source_weight_name or ".reference." in source_weight_name:
+                    continue
                 param_name = source_weight_name
                 for k in packed_modules_mapping:
                     if k in param_name:

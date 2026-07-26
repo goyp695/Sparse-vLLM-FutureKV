@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "futurekv-training"
+version = "0.1.0"
+description = "Standalone FutureKV judge training for Qwen3-VL"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "torch>=2.5",
+  "transformers>=4.57",
+  "pillow>=10",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+futurekv-train-judge = "futurekv_training.cli.train_judge:main"
+futurekv-train-two-stage = "futurekv_training.cli.train_two_stage:main"
+futurekv-train-lora = "futurekv_training.cli.train_lora:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["futurekv_training*"]

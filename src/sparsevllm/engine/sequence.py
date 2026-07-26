@@ -16,7 +16,12 @@ class SequenceStatus(Enum):
 class Sequence:
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(
+        self,
+        token_ids: list[int],
+        sampling_params=SamplingParams(),
+        multi_modal_data: dict | None = None,
+    ):
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
@@ -40,6 +45,8 @@ class Sequence:
         self.logprobs = sampling_params.logprobs
         self.completion_token_logprobs: list[float | None] = []
         self.completion_top_logprobs: list[dict[int, float] | None] = []
+        self.multi_modal_data = multi_modal_data
+        self.qwen3vl_cache = None
 
     def __len__(self):
         return self.num_tokens
@@ -127,6 +134,7 @@ class Sequence:
             self.prefix_cache_hit_last_block_id,
             self.prefix_cache_block_size,
             self.prefix_cache_method,
+            self.multi_modal_data,
         )
 
     def __setstate__(self, state):
@@ -134,9 +142,11 @@ class Sequence:
          self.num_prefilled_tokens, self.current_chunk_size, self.temperature,
          self.top_p, self.top_k, self.max_tokens, self.ignore_eos, self.logprobs, data,
          self.prefix_cache_enabled, self.prefix_cache_hit_len, self.prefix_cache_hit_block_count,
-         self.prefix_cache_hit_last_block_id, self.prefix_cache_block_size, self.prefix_cache_method) = state
+         self.prefix_cache_hit_last_block_id, self.prefix_cache_block_size,
+         self.prefix_cache_method, self.multi_modal_data) = state
         self.completion_token_logprobs = []
         self.completion_top_logprobs = []
+        self.qwen3vl_cache = None
 
         if self.num_completion_tokens == 0:
             self.token_ids = data

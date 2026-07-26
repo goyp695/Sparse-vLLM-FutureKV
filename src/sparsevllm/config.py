@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import torch
 from dataclasses import dataclass, field
 from typing import Any, Union
 
@@ -214,6 +215,7 @@ def _normalize_decode_cuda_graph_context_policy(value: str | None) -> str:
 @dataclass
 class Config:
     model: str
+    dtype: str | None = None
     max_num_batched_tokens: int = 65536
     max_num_seqs_in_batch: int = 32  # 不能设置太大
     max_model_len: int = 128_000
@@ -227,6 +229,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = True
     hf_config: Union[Qwen3Config, AutoConfig] | None = None
+    multimodal_hf_config: AutoConfig | None = None
     eos: int = -1
     num_kvcache_slots: int | list = -1
 
@@ -274,6 +277,14 @@ class Config:
     # SnapKV Config
     snapkv_window_size: int = 32
     snapkv_num_full_layers: int = 0  # 前多少层不进行驱逐
+
+    # FutureKV Config
+    futurekv_budget: int = 1024
+    futurekv_window_size: int = 1024
+    futurekv_step_drop: int = 256
+    futurekv_divide_length: int = 128
+    futurekv_num_full_layers: int = 0
+    futurekv_judge_path: str | None = None
 
     # R-KV Config
     rkv_compression_interval: int = 128
@@ -637,12 +648,36 @@ class Config:
             deltakv_path = self.deltakv_path.strip()
             self.deltakv_path = None if deltakv_path.lower() in {"", "none", "null"} else deltakv_path
         try:
-            self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
+            loaded_hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         except Exception as e:
             raise RuntimeError(
                 "AutoConfig.from_pretrained failed. Refusing to silently fall back to raw "
                 f"`config.json`. model={self.model} error={type(e).__name__}: {e}"
             ) from e
+        if getattr(loaded_hf_config, "model_type", "") == "qwen3_vl":
+            self.multimodal_hf_config = loaded_hf_config
+            self.hf_config = loaded_hf_config.text_config
+            for key in ("image_token_id", "video_token_id", "vision_start_token_id", "vision_end_token_id"):
+                if hasattr(loaded_hf_config, key):
+                    setattr(self.hf_config, key, getattr(loaded_hf_config, key))
+            self.hf_config.vision_config = loaded_hf_config.vision_config
+        else:
+            self.hf_config = loaded_hf_config
+        if self.dtype is not None:
+            dtype_name = str(self.dtype).strip().lower()
+            dtype_aliases = {
+                "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+                "fp16": torch.float16, "float16": torch.float16,
+                "fp32": torch.float32, "float32": torch.float32,
+            }
+            if dtype_name not in dtype_aliases:
+                raise ValueError(f"Unsupported dtype={self.dtype!r}; expected bf16, fp16, or fp32.")
+            resolved_dtype = dtype_aliases[dtype_name]
+            self.hf_config.torch_dtype = resolved_dtype
+            if self.multimodal_hf_config is not None:
+                self.multimodal_hf_config.torch_dtype = resolved_dtype
+                self.multimodal_hf_config.text_config.torch_dtype = resolved_dtype
+                self.multimodal_hf_config.vision_config.torch_dtype = resolved_dtype
         if getattr(self.hf_config, "model_type", "") in {"deepseek_v2", "deepseek_v32"}:
             raise NotImplementedError(
                 f"Unsupported Sparse-vLLM model_type={self.hf_config.model_type!r}. "
@@ -665,6 +700,35 @@ class Config:
             raise ValueError("quest_token_budget 必须 > 0")
         if self.quest_skip_layers < 0:
             raise ValueError("quest_skip_layers 不能 < 0")
+        self.futurekv_budget = int(self.futurekv_budget)
+        self.futurekv_window_size = int(self.futurekv_window_size)
+        self.futurekv_step_drop = int(self.futurekv_step_drop)
+        self.futurekv_divide_length = int(self.futurekv_divide_length)
+        self.futurekv_num_full_layers = int(self.futurekv_num_full_layers)
+        if isinstance(self.futurekv_judge_path, str):
+            path = self.futurekv_judge_path.strip()
+            self.futurekv_judge_path = None if path.lower() in {"", "none", "null"} else path
+        if self.futurekv_budget <= 0:
+            raise ValueError(f"futurekv_budget must be > 0, got {self.futurekv_budget}.")
+        if self.futurekv_window_size <= 0:
+            raise ValueError(f"futurekv_window_size must be > 0, got {self.futurekv_window_size}.")
+        if self.futurekv_step_drop <= 0:
+            raise ValueError(f"futurekv_step_drop must be > 0, got {self.futurekv_step_drop}.")
+        if self.futurekv_divide_length < 0:
+            raise ValueError(f"futurekv_divide_length must be >= 0, got {self.futurekv_divide_length}.")
+        if self.futurekv_budget < self.futurekv_step_drop:
+            raise ValueError(
+                "futurekv_budget must be >= futurekv_step_drop, got "
+                f"budget={self.futurekv_budget} step_drop={self.futurekv_step_drop}."
+            )
+        if self.futurekv_num_full_layers < 0:
+            raise ValueError(f"futurekv_num_full_layers must be >= 0, got {self.futurekv_num_full_layers}.")
+        if self.vllm_sparse_method == "futurekv" and self.futurekv_judge_path is None:
+            raise ValueError(
+                "futurekv_judge_path is required when vllm_sparse_method='futurekv'."
+            )
+        if self.futurekv_judge_path is not None and not os.path.exists(self.futurekv_judge_path):
+            raise FileNotFoundError(f"futurekv_judge_path does not exist: {self.futurekv_judge_path}")
         self.rkv_compression_interval = int(self.rkv_compression_interval or 0)
         if self.rkv_compression_interval <= 0:
             raise ValueError(

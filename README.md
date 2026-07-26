@@ -8,7 +8,8 @@
   </p>
 </div>
 
-A sparse-first inference engine for long-context LLM serving, which also includes DeltaKV compressor training and evaluation tooling.
+A sparse-first inference engine for long-context LLM serving, including native
+FutureKV inference, standalone FutureKV judge training, and DeltaKV tooling.
 
 <div align="center">
   <img src="docs/assets/sparse_vllm_throughput.png" alt="Sparse-vLLM throughput" style="width:86%; height:auto;">
@@ -42,13 +43,14 @@ adapters live under `src/deltakv/` and `benchmark/`.
 
 Sparse-vLLM supports physical eviction, logical masking, query-aware selection,
 and hybrid KV compression. The main method families are `streamingllm`,
-`snapkv`, `pyramidkv`, `omnikv`, `quest`, and `deltakv`.
+`snapkv`, `futurekv`, `pyramidkv`, `omnikv`, `quest`, and `deltakv`.
 
 | Method | Type | Short Description |
 | --- | --- | --- |
 | `vanilla` | Dense baseline | Runs full attention and keeps the standard KV cache behavior for correctness and performance baselines. |
 | `streamingllm` / `attention-sink` | Physical eviction | Keeps fixed sink tokens plus a recent window, then physically evicts older tokens outside that policy. |
 | `snapkv`, `pyramidkv` | Physical eviction | Selects important historical tokens during prefill/finalization and stores only the retained KV tokens. |
+| `futurekv` | Learned physical eviction | Uses a trained per-head judge and future-attention features to retain a fixed KV budget. |
 | `omnikv` | Logical masking | Keeps tokens in storage but masks the attention read view so sparse layers attend only selected context. |
 | `quest` | Query-aware selection | Uses decode-time query-aware page selection while keeping prefill dense. |
 | `deltakv` / `deltakv-*` | Hybrid compression | Keeps a small full-precision pool and stores older context through DeltaKV compression or related ablations. |
@@ -66,6 +68,9 @@ Read the method overview and integration rules in
 | Runtime parameter semantics | [Runtime Parameter Semantics](docs/configuration/runtime-parameter-semantics.md) |
 | Benchmark commands | [Benchmarks](docs/benchmarking/README.md) |
 | DeltaKV inference and training | [DeltaKV](docs/features/deltakv.md) |
+| FutureKV overview | [FutureKV](docs/features/futurekv.md) |
+| FutureKV training | [FutureKV training](docs/getting_started/futurekv-training.md) |
+| FutureKV inference | [FutureKV inference](docs/getting_started/futurekv-inference.md) |
 | Reproducibility checklist | [Reproducibility](docs/getting_started/reproducibility.md) |
 
 The full documentation index is maintained in [docs/README.md](docs/README.md).
@@ -85,6 +90,19 @@ pip install -e .
 
 For the full dependency list and a minimal `LLM(...)` example, see
 [Getting Started](docs/getting_started/README.md).
+
+### FutureKV quick path
+
+Install inference from the repository root and training independently:
+
+```bash
+pip install -e .
+pip install -e './futurekv_training[test]'
+```
+
+Train a judge, then pass the exported `judge_model.pt` to the native
+MathVision runner. See the [FutureKV guide](docs/features/futurekv.md) for
+complete commands and checkpoint compatibility rules.
 
 ## Benchmarks
 
