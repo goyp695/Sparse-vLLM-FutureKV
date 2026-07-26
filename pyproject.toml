@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deltakv"
+version = "0.1.0"
+description = "DeltaKV: Compressing KV Cache for Efficient Inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "DeltaKV Team"}
+]
+dependencies = [
+    "fire",
+    "torch",
+    "transformers==5.12.1",
+    "triton==3.4.0",
+    "torchvision",
+    "pillow",
+    "accelerate",
+    "deepspeed",
+    "datasets",
+    "matplotlib",
+    "seaborn",
+    "wandb",
+    "loguru",
+    "ansible",
+    "bitsandbytes",
+    "datatrove",
+    "tqdm",
+    "loguru",
+    "fastapi>=0.100",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "pytest",
+    "math-verify==0.9.0",
+]
+
+[project.scripts]
+deltakv-train = "deltakv.train_compressor:main"
+sparsevllm-openai-server = "sparsevllm.entrypoints.openai.api_server:main"
+sparsevllm-openai-router = "sparsevllm.entrypoints.openai.smart_router:main"
+sparsevllm-openai-client = "sparsevllm.entrypoints.openai.client:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["deltakv*", "sparsevllm*"]

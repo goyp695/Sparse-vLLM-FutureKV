@@ -1,0 +1,17 @@
+.idea
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
+*.py[cod]
+*.egg-info/
+*example.png
+wandb/
+/tmp/
+/scripts/tmp/
+/outputs/
+/.kanna/
+/benchmark/scbench/results/
+/reference/
+/benchmark/results/
+/dev_docs/
+docs/dev-notes/
